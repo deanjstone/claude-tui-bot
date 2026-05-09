@@ -1,43 +1,90 @@
-Here's how to get it running:
+# telegram-claude-bot
 
----
+A Telegram bot that gives you a mobile-friendly interface to Claude Code CLI. Send messages from Telegram, get streaming responses edited live in the chat, and approve or deny Claude's tool use (shell commands, file edits) directly from your phone.
 
-**Step 1 — Create your bot on Telegram**
+## Features
 
-Message [@BotFather](https://t.me/BotFather), send `/newbot`, follow the prompts. It gives you a token like `7123456789:AAF...`.
+- **Streaming responses** — a placeholder message appears immediately and is edited in-place as Claude generates output, no waiting for the full response
+- **Permission gateway** — when Claude wants to run a tool (Bash, file edit, etc.), you get an inline Allow / Deny button; auto-denies after 5 minutes if unanswered
+- **Persistent sessions** — conversation context survives bot restarts via atomic-write-safe `sessions.json`
+- **Startup validation** — verifies the Claude CLI exists and is executable before the bot starts; logs the detected version
 
-**Step 2 — Find your Telegram user ID**
+## Requirements
 
-Message [@userinfobot](https://t.me/userinfobot) — it replies with your numeric ID.
+- Node.js 18+
+- [Claude Code CLI](https://claude.ai/code) v2.x installed and authenticated
+- A Telegram bot token from [@BotFather](https://t.me/BotFather)
+- PM2 (optional, for process management)
 
-**Step 3 — Create `.env`**
+## Setup
+
+**1. Clone and install**
 
 ```bash
-cd ~/projects/telegram-claude-bot
+git clone https://github.com/deanjstone/telegram-claude-bot
+cd telegram-claude-bot
+npm install
+```
+
+**2. Create your Telegram bot**
+
+Message [@BotFather](https://t.me/BotFather), send `/newbot`, follow the prompts. Copy the token it gives you.
+
+**3. Configure**
+
+```bash
 cp .env.example .env
-nano .env  # fill in BOT_TOKEN and your Telegram ID
 ```
 
-**Step 4 — Start with PM2**
+Edit `.env`:
+
+```env
+BOT_TOKEN=7123456789:AAF...your-token-here
+CLAUDE_PATH=/home/youruser/.local/bin/claude   # optional, auto-detected if omitted
+```
+
+**4. Run**
 
 ```bash
-cd ~/projects/telegram-claude-bot
-pm2 start bot.js --name claude-bot
-pm2 save          # remember it across PM2 restarts
+# Direct
+node bot.js
+
+# With PM2 (recommended)
+pm2 start bot.js --name telegram-claude-bot
+pm2 save
+pm2 startup   # prints a command — run it to enable auto-start on reboot
 ```
 
-**Step 5 — Auto-start on WSL2 boot (optional)**
+## Usage
 
-```bash
-pm2 startup       # it prints a command — run that command
+Send any message to start a conversation with Claude. Claude Code runs in your home directory with access to your filesystem and shell.
+
+| Command | Description |
+|---|---|
+| `/start` | Show help |
+| `/new` | Start a fresh conversation (clears session) |
+| `/session` | Show current session ID |
+
+When Claude requests to run a tool, you'll receive a message like:
+
+```
+Tool request: Bash
+`{"command":"ls -la"}`
 ```
 
----
+with **✅ Allow** and **❌ Deny** buttons. Tap Allow to let it proceed, Deny to cancel. Unanswered requests auto-deny after 5 minutes.
 
-**Bot commands:**
+## Configuration
 
-- `/start` — welcome message
-- `/new` — start a fresh conversation
-- `/session` — show current session ID
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `BOT_TOKEN` | Yes | — | Telegram bot token from BotFather |
+| `CLAUDE_PATH` | No | `/home/$USER/.local/bin/claude` | Path to Claude CLI binary |
 
-Each conversation persists across bot restarts via `sessions.json`. To add a second user later, just add their Telegram ID comma-separated in `.env` and restart the bot.
+## Architecture
+
+See [docs/ADR.md](docs/ADR.md) for architecture decisions.
+
+## License
+
+MIT
