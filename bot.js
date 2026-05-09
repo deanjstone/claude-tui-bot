@@ -17,13 +17,16 @@ const inFlight = new Set();
 function loadSessions() {
   try {
     return JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
-  } catch {
+  } catch (err) {
+    if (err.code !== 'ENOENT') console.error('sessions.json parse error:', err.message);
     return {};
   }
 }
 
 function saveSessions(sessions) {
-  fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
+  const tmp = SESSIONS_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(sessions, null, 2));
+  fs.renameSync(tmp, SESSIONS_FILE);
 }
 
 // Split on newline or word boundaries to avoid cutting mid-word or mid-formatting
