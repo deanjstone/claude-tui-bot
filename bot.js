@@ -9,6 +9,7 @@ if (!process.env.BOT_TOKEN) throw new Error('BOT_TOKEN env var is required');
 
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const CLAUDE_TIMEOUT_MS = 120_000;
+const EDIT_INTERVAL_MS = 1500;
 
 // Per-user lock: prevents concurrent claude spawns from the same user
 const inFlight = new Set();
@@ -25,48 +26,6 @@ function saveSessions(sessions) {
   fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
 }
 
-function runClaude(message, sessionId) {
-  return new Promise((resolve, reject) => {
-    const args = ['-p', message, '--output-format', 'json'];
-    if (sessionId) args.push('--resume', sessionId);
-
-    const proc = spawn('/home/deanj/.local/bin/claude', args, { cwd: process.env.HOME });
-    let stdout = '';
-    let stderr = '';
-
-    const timer = setTimeout(() => {
-      proc.kill();
-      reject(new Error(`Claude timed out after ${CLAUDE_TIMEOUT_MS / 1000}s`));
-    }, CLAUDE_TIMEOUT_MS);
-
-    proc.on('error', err => { clearTimeout(timer); reject(err); });
-    proc.stdout.on('data', d => { stdout += d.toString(); });
-    proc.stderr.on('data', d => { stderr += d.toString(); });
-
-    proc.on('close', code => {
-      clearTimeout(timer);
-      if (code !== 0) return reject(new Error(stderr.trim() || `Claude exited with code ${code}`));
-      try {
-        resolve(JSON.parse(stdout));
-      } catch {
-        resolve({ result: stdout.trim(), session_id: null });
-      }
-    });
-  });
-}
-
-async function askClaude(message, sessionId) {
-  try {
-    return await runClaude(message, sessionId);
-  } catch (err) {
-    // Retry as fresh conversation on any failure when a session was active
-    if (sessionId) {
-      return runClaude(message, null);
-    }
-    throw err;
-  }
-}
-
 // Split on newline or word boundaries to avoid cutting mid-word or mid-formatting
 function splitMessage(text, limit = 4096) {
   const chunks = [];
@@ -80,6 +39,100 @@ function splitMessage(text, limit = 4096) {
   }
   if (remaining.length > 0) chunks.push(remaining);
   return chunks;
+}
+
+function streamClaude(message, sessionId, chatId, msgId, telegram) {
+  return new Promise((resolve, reject) => {
+    const args = ['-p', message, '--output-format', 'stream-json'];
+    if (sessionId) args.push('--resume', sessionId);
+
+    const proc = spawn('/home/deanj/.local/bin/claude', args, { cwd: process.env.HOME });
+
+    let lineBuffer = '';
+    let textBuffer = '';
+    let lastEditedText = '...';
+    let resolvedSessionId = null;
+    let editTimer = null;
+
+    const timer = setTimeout(() => {
+      proc.kill();
+      clearInterval(editTimer);
+      reject(new Error(`Claude timed out after ${CLAUDE_TIMEOUT_MS / 1000}s`));
+    }, CLAUDE_TIMEOUT_MS);
+
+    editTimer = setInterval(async () => {
+      const current = textBuffer || '...';
+      if (current !== lastEditedText && current.length <= 4096) {
+        try {
+          await telegram.editMessageText(chatId, msgId, undefined, current);
+          lastEditedText = current;
+        } catch {}
+      }
+    }, EDIT_INTERVAL_MS);
+
+    proc.on('error', err => {
+      clearTimeout(timer);
+      clearInterval(editTimer);
+      reject(err);
+    });
+
+    proc.stdout.on('data', chunk => {
+      lineBuffer += chunk.toString();
+      const lines = lineBuffer.split('\n');
+      lineBuffer = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+          if (event.type === 'assistant') {
+            for (const block of (event.message?.content ?? [])) {
+              if (block.type === 'text') textBuffer += block.text;
+            }
+          } else if (event.type === 'result') {
+            resolvedSessionId = event.session_id ?? null;
+          }
+        } catch {}
+      }
+    });
+
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+
+    proc.on('close', async code => {
+      clearTimeout(timer);
+      clearInterval(editTimer);
+
+      if (code !== 0) {
+        return reject(new Error(stderr.trim() || `Claude exited with code ${code}`));
+      }
+
+      const finalText = textBuffer || '(no response)';
+      const chunks = splitMessage(finalText);
+
+      try {
+        if (chunks[0] !== lastEditedText) {
+          await telegram.editMessageText(chatId, msgId, undefined, chunks[0]);
+        }
+        for (const chunk of chunks.slice(1)) {
+          await telegram.sendMessage(chatId, chunk);
+        }
+      } catch {}
+
+      resolve({ result: finalText, session_id: resolvedSessionId });
+    });
+  });
+}
+
+async function askClaude(message, sessionId, chatId, msgId, telegram) {
+  try {
+    return await streamClaude(message, sessionId, chatId, msgId, telegram);
+  } catch (err) {
+    // Retry as fresh conversation on any failure when a session was active
+    if (sessionId) {
+      return streamClaude(message, null, chatId, msgId, telegram);
+    }
+    throw err;
+  }
 }
 
 const bot = new Telegraf(process.env.BOT_TOKEN, { telegram: { agent: new https.Agent({ family: 4 }) } });
@@ -119,17 +172,27 @@ bot.on('text', async ctx => {
     4000
   );
 
+  let placeholderMsg;
   try {
-    const res = await askClaude(ctx.message.text, sessionId);
+    placeholderMsg = await ctx.reply('...');
+  } catch (err) {
+    clearInterval(typingInterval);
+    inFlight.delete(userId);
+    return;
+  }
+
+  try {
+    const res = await askClaude(
+      ctx.message.text,
+      sessionId,
+      ctx.chat.id,
+      placeholderMsg.message_id,
+      ctx.telegram
+    );
 
     if (res.session_id && res.session_id !== sessionId) {
       sessions[userId] = res.session_id;
       saveSessions(sessions);
-    }
-
-    const text = res.result ?? '(no response)';
-    for (const chunk of splitMessage(text)) {
-      await ctx.reply(chunk);
     }
   } catch (err) {
     await ctx.reply(`Error: ${err.message}`);
