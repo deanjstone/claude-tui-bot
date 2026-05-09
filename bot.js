@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Telegraf } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf');
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const https = require('https');
@@ -35,9 +35,11 @@ checkClaude();
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const CLAUDE_TIMEOUT_MS = 120_000;
 const EDIT_INTERVAL_MS = 1500;
+const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
 
 // Per-user lock: prevents concurrent claude spawns from the same user
 const inFlight = new Set();
+const pendingPermissions = new Map(); // permId -> { resolve, timer, chatId, msgId, toolName, preview }
 
 function loadSessions() {
   try {
@@ -69,7 +71,33 @@ function splitMessage(text, limit = 4096) {
   return chunks;
 }
 
-function streamClaude(message, sessionId, chatId, msgId, telegram) {
+async function requestPermission(ctx, permId, toolName, input) {
+  const preview = JSON.stringify(input).slice(0, 200);
+  const msg = await ctx.reply(
+    `Tool request: ${toolName}\n\`${preview}\``,
+    {
+      ...Markup.inlineKeyboard([
+        Markup.button.callback('✅ Allow', `allow_${permId}`),
+        Markup.button.callback('❌ Deny', `deny_${permId}`)
+      ]),
+      parse_mode: 'Markdown'
+    }
+  );
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingPermissions.delete(permId);
+      ctx.telegram.editMessageText(
+        ctx.chat.id, msg.message_id, undefined,
+        `Tool request: ${toolName}\n\`${preview}\`\n\n_Auto-denied after timeout_`,
+        { parse_mode: 'Markdown' }
+      ).catch(() => {});
+      resolve(false);
+    }, PERMISSION_TIMEOUT_MS);
+    pendingPermissions.set(permId, { resolve, timer, chatId: ctx.chat.id, msgId: msg.message_id, toolName, preview });
+  });
+}
+
+function streamClaude(message, sessionId, chatId, msgId, telegram, ctx) {
   return new Promise((resolve, reject) => {
     const args = ['-p', message, '--output-format', 'stream-json'];
     if (sessionId) args.push('--resume', sessionId);
@@ -81,6 +109,7 @@ function streamClaude(message, sessionId, chatId, msgId, telegram) {
     let lastEditedText = '...';
     let resolvedSessionId = null;
     let editTimer = null;
+    let denied = false;
 
     const timer = setTimeout(() => {
       proc.kill();
@@ -115,6 +144,15 @@ function streamClaude(message, sessionId, chatId, msgId, telegram) {
           if (event.type === 'assistant') {
             for (const block of (event.message?.content ?? [])) {
               if (block.type === 'text') textBuffer += block.text;
+              if (block.type === 'tool_use' && ctx) {
+                const { id, name, input } = block;
+                requestPermission(ctx, id, name, input).then(allowed => {
+                  if (!allowed && !denied) {
+                    denied = true;
+                    proc.kill();
+                  }
+                }).catch(() => {});
+              }
             }
           } else if (event.type === 'result') {
             resolvedSessionId = event.session_id ?? null;
@@ -130,7 +168,7 @@ function streamClaude(message, sessionId, chatId, msgId, telegram) {
       clearTimeout(timer);
       clearInterval(editTimer);
 
-      if (code !== 0) {
+      if (code !== 0 && !denied) {
         return reject(new Error(stderr.trim() || `Claude exited with code ${code}`));
       }
 
@@ -151,13 +189,13 @@ function streamClaude(message, sessionId, chatId, msgId, telegram) {
   });
 }
 
-async function askClaude(message, sessionId, chatId, msgId, telegram) {
+async function askClaude(message, sessionId, chatId, msgId, telegram, ctx) {
   try {
-    return await streamClaude(message, sessionId, chatId, msgId, telegram);
+    return await streamClaude(message, sessionId, chatId, msgId, telegram, ctx);
   } catch (err) {
     // Retry as fresh conversation on any failure when a session was active
     if (sessionId) {
-      return streamClaude(message, null, chatId, msgId, telegram);
+      return streamClaude(message, null, chatId, msgId, telegram, ctx);
     }
     throw err;
   }
@@ -180,6 +218,28 @@ bot.command('session', ctx => {
   const sessions = loadSessions();
   const id = sessions[ctx.from.id];
   ctx.reply(id ? `Active session: ${id}` : 'No active session — next message will start one.');
+});
+
+bot.action(/^allow_(.+)$/, async ctx => {
+  const permId = ctx.match[1];
+  const pending = pendingPermissions.get(permId);
+  if (!pending) return ctx.answerCbQuery('Already resolved');
+  clearTimeout(pending.timer);
+  pendingPermissions.delete(permId);
+  await ctx.editMessageText(`Tool request: ${pending.toolName}\n\`${pending.preview}\`\n\n_Allowed_`, { parse_mode: 'Markdown' });
+  await ctx.answerCbQuery('Allowed');
+  pending.resolve(true);
+});
+
+bot.action(/^deny_(.+)$/, async ctx => {
+  const permId = ctx.match[1];
+  const pending = pendingPermissions.get(permId);
+  if (!pending) return ctx.answerCbQuery('Already resolved');
+  clearTimeout(pending.timer);
+  pendingPermissions.delete(permId);
+  await ctx.editMessageText(`Tool request: ${pending.toolName}\n\`${pending.preview}\`\n\n_Denied_`, { parse_mode: 'Markdown' });
+  await ctx.answerCbQuery('Denied');
+  pending.resolve(false);
 });
 
 bot.on('text', async ctx => {
@@ -215,7 +275,8 @@ bot.on('text', async ctx => {
       sessionId,
       ctx.chat.id,
       placeholderMsg.message_id,
-      ctx.telegram
+      ctx.telegram,
+      ctx
     );
 
     if (res.session_id && res.session_id !== sessionId) {
@@ -233,5 +294,11 @@ bot.on('text', async ctx => {
 bot.launch();
 console.log('Bot running.');
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once('SIGINT', () => {
+  pendingPermissions.forEach(p => { clearTimeout(p.timer); p.resolve(false); });
+  bot.stop('SIGINT');
+});
+process.once('SIGTERM', () => {
+  pendingPermissions.forEach(p => { clearTimeout(p.timer); p.resolve(false); });
+  bot.stop('SIGTERM');
+});
