@@ -99,7 +99,7 @@ async function requestPermission(ctx, permId, toolName, input) {
 
 function streamClaude(message, sessionId, chatId, msgId, telegram, ctx) {
   return new Promise((resolve, reject) => {
-    const args = ['-p', message, '--output-format', 'stream-json'];
+    const args = ['-p', message, '--output-format', 'stream-json', '--verbose'];
     if (sessionId) args.push('--resume', sessionId);
 
     const proc = spawn(CLAUDE_PATH, args, { cwd: process.env.HOME });
