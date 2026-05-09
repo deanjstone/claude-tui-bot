@@ -1,11 +1,36 @@
 require('dotenv').config();
 const { Telegraf } = require('telegraf');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const https = require('https');
 const path = require('path');
 
 if (!process.env.BOT_TOKEN) throw new Error('BOT_TOKEN env var is required');
+
+const CLAUDE_PATH = process.env.CLAUDE_PATH || '/home/deanj/.local/bin/claude';
+
+function checkClaude() {
+  try {
+    fs.accessSync(CLAUDE_PATH, fs.constants.X_OK);
+  } catch {
+    console.error(`Claude CLI not found or not executable at: ${CLAUDE_PATH}`);
+    console.error('Set CLAUDE_PATH env var to the correct path.');
+    process.exit(1);
+  }
+  try {
+    const version = execSync(`"${CLAUDE_PATH}" --version`, { encoding: 'utf8' }).trim();
+    console.log(`Claude CLI: ${version}`);
+    const match = version.match(/(\d+)\./);
+    if (match && parseInt(match[1]) < 2) {
+      console.warn('Warning: Claude CLI version < 2.0 detected. stream-json output may not be supported.');
+    }
+  } catch (err) {
+    console.error('Claude CLI version check failed:', err.message);
+    process.exit(1);
+  }
+}
+
+checkClaude();
 
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const CLAUDE_TIMEOUT_MS = 120_000;
@@ -49,7 +74,7 @@ function streamClaude(message, sessionId, chatId, msgId, telegram) {
     const args = ['-p', message, '--output-format', 'stream-json'];
     if (sessionId) args.push('--resume', sessionId);
 
-    const proc = spawn('/home/deanj/.local/bin/claude', args, { cwd: process.env.HOME });
+    const proc = spawn(CLAUDE_PATH, args, { cwd: process.env.HOME });
 
     let lineBuffer = '';
     let textBuffer = '';
