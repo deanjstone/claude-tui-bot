@@ -39,6 +39,7 @@ const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
 
 const inFlight = new Map(); // userId -> { proc }
 const pendingPermissions = new Map(); // permId -> { resolve, timer, chatId, msgId, toolName, preview }
+const allowedTools = new Map(); // toolUseId -> { chatId, msgId, toolName }
 const lastMessageTime = new Map(); // userId -> timestamp ms
 
 const allowedUserIds = process.env.ALLOWED_USER_IDS
@@ -76,37 +77,62 @@ function splitMessage(text, limit = 4096) {
   return chunks;
 }
 
+function formatToolPreview(toolName, input) {
+  if (input.command) return `$ ${input.command}`.slice(0, 300);
+  if (input.file_path || input.path) {
+    const p = input.file_path || input.path;
+    const snippet = input.content ? '\n' + String(input.content).slice(0, 150) : '';
+    return (p + snippet).slice(0, 300);
+  }
+  if (input.query) return input.query.slice(0, 300);
+  if (input.url) return input.url.slice(0, 300);
+  const s = JSON.stringify(input, null, 2);
+  return s.length > 300 ? s.slice(0, 300) + '\n…' : s;
+}
+
+function formatError(err) {
+  if (err.code === 'TIMEOUT')
+    return `⏱ Request timed out after ${CLAUDE_TIMEOUT_MS / 1000}s. Try a simpler request, or /cancel and resend.`;
+  if (err.code === 'PROCESS_ERROR')
+    return `Claude exited with error (code ${err.exitCode}).\n${err.message}\n\nTry /new to start a fresh conversation.`;
+  if (err.message?.includes('ENOENT'))
+    return 'Claude CLI not found. Check that CLAUDE_PATH is set correctly.';
+  return `Error: ${err.message}`;
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 function toHtml(text) {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/```(\w*)\n?([\s\S]*?)```/g, (_, _lang, code) => `<pre><code>${code.trimEnd()}</code></pre>`)
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
-    .replace(/\*([^*]+)\*/g, '<i>$1</i>')
+    .replace(/\*([^*\n]+)\*/g, '<i>$1</i>')
     .replace(/^#{1,3} (.+)$/gm, '<b>$1</b>');
 }
 
 async function requestPermission(ctx, permId, toolName, input) {
-  const preview = JSON.stringify(input).slice(0, 200);
-  const msg = await ctx.reply(
-    `Tool request: ${toolName}\n\`${preview}\``,
-    {
-      ...Markup.inlineKeyboard([
-        Markup.button.callback('✅ Allow', `allow_${permId}`),
-        Markup.button.callback('❌ Deny', `deny_${permId}`)
-      ]),
-      parse_mode: 'Markdown'
-    }
-  );
+  const preview = formatToolPreview(toolName, input);
+  const msgText = `🔧 <b>${escapeHtml(toolName)}</b>\n<pre><code>${escapeHtml(preview)}</code></pre>`;
+  const msg = await ctx.reply(msgText, {
+    ...Markup.inlineKeyboard([
+      Markup.button.callback('✅ Allow', `allow_${permId}`),
+      Markup.button.callback('❌ Deny', `deny_${permId}`)
+    ]),
+    parse_mode: 'HTML'
+  });
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       pendingPermissions.delete(permId);
       ctx.telegram.editMessageText(
         ctx.chat.id, msg.message_id, undefined,
-        `Tool request: ${toolName}\n\`${preview}\`\n\n_Auto-denied after timeout_`,
-        { parse_mode: 'Markdown' }
+        `🔧 <b>${escapeHtml(toolName)}</b>\n<pre><code>${escapeHtml(preview)}</code></pre>\n\n⏱ <i>Auto-denied after timeout</i>`,
+        { parse_mode: 'HTML' }
       ).catch(() => {});
       resolve(false);
     }, PERMISSION_TIMEOUT_MS);
@@ -119,11 +145,12 @@ function streamClaude(message, sessionId, chatId, msgId, telegram, ctx, onProcSp
     const args = ['-p', message, '--output-format', 'stream-json', '--verbose'];
     if (sessionId) args.push('--resume', sessionId);
 
-    const proc = spawn(CLAUDE_PATH, args, { cwd: process.env.HOME });
+    const proc = spawn(CLAUDE_PATH, args, { cwd: __dirname });
     onProcSpawned?.(proc);
 
     let lineBuffer = '';
     let textBuffer = '';
+    let thinkingHtml = '';
     let lastEditedText = '...';
     let resolvedSessionId = null;
     let editTimer = null;
@@ -132,17 +159,25 @@ function streamClaude(message, sessionId, chatId, msgId, telegram, ctx, onProcSp
     const timer = setTimeout(() => {
       proc.kill();
       clearInterval(editTimer);
-      reject(new Error(`Claude timed out after ${CLAUDE_TIMEOUT_MS / 1000}s`));
+      const err = new Error(`Claude timed out after ${CLAUDE_TIMEOUT_MS / 1000}s`);
+      err.code = 'TIMEOUT';
+      reject(err);
     }, CLAUDE_TIMEOUT_MS);
 
     editTimer = setInterval(async () => {
-      const current = textBuffer || '...';
-      if (current !== lastEditedText && current.length <= 4096) {
+      const rawCurrent = textBuffer || '...';
+      const htmlCurrent = thinkingHtml + toHtml(rawCurrent);
+      if (htmlCurrent !== lastEditedText && rawCurrent.length <= 4096) {
         try {
-          await telegram.editMessageText(chatId, msgId, undefined, current);
-          lastEditedText = current;
-        } catch (err) {
-          console.warn('edit failed:', err.message);
+          await telegram.editMessageText(chatId, msgId, undefined, htmlCurrent, { parse_mode: 'HTML' });
+          lastEditedText = htmlCurrent;
+        } catch {
+          if (rawCurrent !== lastEditedText) {
+            try {
+              await telegram.editMessageText(chatId, msgId, undefined, rawCurrent);
+              lastEditedText = rawCurrent;
+            } catch (e) { console.warn('edit failed:', e.message); }
+          }
         }
       }
     }, EDIT_INTERVAL_MS);
@@ -163,6 +198,11 @@ function streamClaude(message, sessionId, chatId, msgId, telegram, ctx, onProcSp
           const event = JSON.parse(line);
           if (event.type === 'assistant') {
             for (const block of (event.message?.content ?? [])) {
+              if (block.type === 'thinking') {
+                const raw = block.thinking || '';
+                const excerpt = escapeHtml(raw.slice(0, 500)) + (raw.length > 500 ? '…' : '');
+                thinkingHtml = `<i>∴ Thinking…</i>\n<blockquote>${excerpt}</blockquote>\n\n`;
+              }
               if (block.type === 'text') textBuffer += block.text;
               if (block.type === 'tool_use' && ctx) {
                 const { id, name, input } = block;
@@ -172,6 +212,24 @@ function streamClaude(message, sessionId, chatId, msgId, telegram, ctx, onProcSp
                     proc.kill();
                   }
                 }).catch(() => {});
+              }
+            }
+          } else if (event.type === 'user') {
+            for (const block of (event.message?.content ?? [])) {
+              if (block.type === 'tool_result') {
+                const entry = allowedTools.get(block.tool_use_id);
+                if (entry) {
+                  allowedTools.delete(block.tool_use_id);
+                  const text = Array.isArray(block.content)
+                    ? block.content.filter(c => c.type === 'text').map(c => c.text).join('')
+                    : String(block.content ?? '');
+                  const excerpt = text.slice(0, 200) + (text.length > 200 ? '…' : '');
+                  telegram.editMessageText(
+                    entry.chatId, entry.msgId, undefined,
+                    `🔧 <b>${escapeHtml(entry.toolName)}</b>\n✅ Allowed\n<code>${escapeHtml(excerpt || '(no output)')}</code>`,
+                    { parse_mode: 'HTML' }
+                  ).catch(() => {});
+                }
               }
             }
           } else if (event.type === 'result') {
@@ -189,31 +247,37 @@ function streamClaude(message, sessionId, chatId, msgId, telegram, ctx, onProcSp
       clearInterval(editTimer);
 
       if (code !== 0 && !denied) {
-        return reject(new Error(stderr.trim() || `Claude exited with code ${code}`));
+        const err = new Error(stderr.trim() || `Claude exited with code ${code}`);
+        err.code = 'PROCESS_ERROR';
+        err.exitCode = code;
+        return reject(err);
       }
 
       const finalText = textBuffer || '(no response)';
-      const htmlText = toHtml(finalText);
+      const htmlText = thinkingHtml + toHtml(finalText);
       const chunks = splitMessage(htmlText);
+      const labeled = chunks.length > 1
+        ? chunks.map((c, i) => `[${i + 1}/${chunks.length}]\n${c}`)
+        : chunks;
 
       try {
-        if (chunks[0] !== lastEditedText) {
+        if (labeled[0] !== lastEditedText) {
           try {
-            await telegram.editMessageText(chatId, msgId, undefined, chunks[0], { parse_mode: 'HTML' });
+            await telegram.editMessageText(chatId, msgId, undefined, labeled[0], { parse_mode: 'HTML' });
           } catch {
-            await telegram.editMessageText(chatId, msgId, undefined, chunks[0]);
+            await telegram.editMessageText(chatId, msgId, undefined, labeled[0]);
           }
         }
       } catch (err) {
         console.warn('edit failed:', err.message);
         try {
-          await telegram.sendMessage(chatId, chunks[0]);
+          await telegram.sendMessage(chatId, labeled[0]);
         } catch (e) {
           console.warn('sendMessage failed:', e.message);
         }
       }
 
-      for (const chunk of chunks.slice(1)) {
+      for (const chunk of labeled.slice(1)) {
         try {
           await telegram.sendMessage(chatId, chunk, { parse_mode: 'HTML' });
         } catch {
@@ -234,8 +298,8 @@ async function askClaude(message, sessionId, chatId, msgId, telegram, ctx, onPro
   try {
     return await streamClaude(message, sessionId, chatId, msgId, telegram, ctx, onProcSpawned);
   } catch (err) {
-    // Retry as fresh conversation on any failure when a session was active
     if (sessionId) {
+      await telegram.sendMessage(chatId, '⚠️ Session expired — retrying as new conversation…').catch(() => {});
       return streamClaude(message, null, chatId, msgId, telegram, ctx, onProcSpawned);
     }
     throw err;
@@ -251,7 +315,7 @@ if (allowedUserIds) {
   });
 }
 
-const HELP_TEXT = 'Connected to Claude. Send a message to begin.\n\nThe bot can execute tools with your approval — you will see an inline permission prompt. Note: tools may access your filesystem and run commands.\n\nCommands:\n/new — start a fresh conversation\n/session — show current session ID\n/cancel — abort the current request\n/restart — restart the bot service\n/help — show this message';
+const HELP_TEXT = 'Connected to Claude. Send a message to begin.\n\nThe bot can execute tools with your approval — you will see an inline permission prompt. Note: tools may access your filesystem and run commands.\n\nCommands:\n/new — start a fresh conversation\n/session — show current session ID\n/cancel — abort the current request\n/restart — restart the bot service\n/help — show this message\n\nAny other /command is forwarded to Claude as a message.';
 
 bot.command('start', ctx => ctx.reply(HELP_TEXT));
 bot.command('help', ctx => ctx.reply(HELP_TEXT));
@@ -294,7 +358,11 @@ bot.action(/^allow_(.+)$/, async ctx => {
   if (!pending) return ctx.answerCbQuery('Already resolved');
   clearTimeout(pending.timer);
   pendingPermissions.delete(permId);
-  await ctx.editMessageText(`Tool request: ${pending.toolName}\n\`${pending.preview}\`\n\n_Allowed_`, { parse_mode: 'Markdown' });
+  allowedTools.set(permId, { chatId: pending.chatId, msgId: pending.msgId, toolName: pending.toolName });
+  await ctx.editMessageText(
+    `🔧 <b>${escapeHtml(pending.toolName)}</b>\n<pre><code>${escapeHtml(pending.preview)}</code></pre>\n\n✅ <i>Allowed</i>`,
+    { parse_mode: 'HTML' }
+  );
   await ctx.answerCbQuery('Allowed');
   pending.resolve(true);
 });
@@ -305,7 +373,10 @@ bot.action(/^deny_(.+)$/, async ctx => {
   if (!pending) return ctx.answerCbQuery('Already resolved');
   clearTimeout(pending.timer);
   pendingPermissions.delete(permId);
-  await ctx.editMessageText(`Tool request: ${pending.toolName}\n\`${pending.preview}\`\n\n_Denied_`, { parse_mode: 'Markdown' });
+  await ctx.editMessageText(
+    `🔧 <b>${escapeHtml(pending.toolName)}</b>\n<pre><code>${escapeHtml(pending.preview)}</code></pre>\n\n❌ <i>Denied</i>`,
+    { parse_mode: 'HTML' }
+  );
   await ctx.answerCbQuery('Denied');
   pending.resolve(false);
 });
@@ -363,13 +434,17 @@ bot.on('text', async ctx => {
       saveSessions(sessions);
     }
   } catch (err) {
-    await ctx.reply(`Error: ${err.message}`);
+    await ctx.reply(formatError(err));
   } finally {
     clearInterval(typingInterval);
     inFlight.delete(userId);
     lastMessageTime.set(userId, Date.now());
   }
 });
+
+for (const type of ['photo', 'sticker', 'video', 'voice', 'audio', 'document', 'animation', 'video_note']) {
+  bot.on(type, ctx => ctx.reply('Unsupported media — send text to chat with Claude.'));
+}
 
 bot.launch();
 console.log('Bot running.');

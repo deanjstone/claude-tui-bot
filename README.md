@@ -4,10 +4,11 @@ A Telegram bot that gives you a mobile-friendly interface to Claude Code CLI. Se
 
 ## Features
 
-- **Streaming responses** — a placeholder message appears immediately and is edited in-place as Claude generates output, no waiting for the full response
-- **Permission gateway** — when Claude wants to run a tool (Bash, file edit, etc.), you get an inline Allow / Deny button; auto-denies after 5 minutes if unanswered
-- **Persistent sessions** — conversation context survives bot restarts via atomic-write-safe `sessions.json`
+- **Streaming responses** — a placeholder message appears immediately and is edited in-place with HTML formatting (code blocks, bold, inline code) as Claude generates output
+- **Permission gateway** — tool requests show a readable preview (`$ command`, file path, query) with Allow / Deny buttons; after execution the message updates to show the result output; auto-denies after 5 minutes if unanswered
+- **Persistent sessions** — conversation context survives bot restarts via atomic-write-safe `sessions.json` in the deploy directory; session expiry is surfaced to the user before retry
 - **Startup validation** — verifies the Claude CLI exists and is executable before the bot starts; logs the detected version
+- **Categorized errors** — timeouts, process failures, and session expiry each produce a distinct, actionable error message
 
 ## Requirements
 
@@ -18,12 +19,12 @@ A Telegram bot that gives you a mobile-friendly interface to Claude Code CLI. Se
 
 ## Setup
 
-**1. Clone and install**
+Source lives in the git repo (`~/projects/telegram-claude-bot/`). The running bot lives in `~/tools/telegram-claude-bot/` — a clean deployment directory separate from the working tree.
+
+**1. Clone**
 
 ```bash
-git clone https://github.com/deanjstone/telegram-claude-bot
-cd telegram-claude-bot
-npm install
+git clone https://github.com/deanjstone/telegram-claude-bot ~/projects/telegram-claude-bot
 ```
 
 **2. Create your Telegram bot**
@@ -33,10 +34,11 @@ Message [@BotFather](https://t.me/BotFather), send `/newbot`, follow the prompts
 **3. Configure**
 
 ```bash
-cp .env.example .env
+mkdir -p ~/tools/telegram-claude-bot
+cp ~/projects/telegram-claude-bot/.env.example ~/tools/telegram-claude-bot/.env
 ```
 
-Edit `.env`:
+Edit `~/tools/telegram-claude-bot/.env`:
 
 ```env
 BOT_TOKEN=7123456789:AAF...your-token-here
@@ -45,29 +47,37 @@ CLAUDE_PATH=/home/youruser/.local/bin/claude   # optional, auto-detected if omit
 
 **4. Install the systemd user service**
 
-Copy the service file and enable it:
+Edit the service template to replace `YOUR_USER` with your username, then install it:
 
 ```bash
-cp telegram-claude-bot.service ~/.config/systemd/user/
+sed "s/YOUR_USER/$USER/g" ~/projects/telegram-claude-bot/telegram-claude-bot.service \
+  > ~/.config/systemd/user/telegram-claude-bot.service
 systemctl --user daemon-reload
 systemctl --user enable telegram-claude-bot
-systemctl --user start telegram-claude-bot
 ```
 
-The service loads `.env` from the project directory, restarts automatically on failure, and starts on login.
+**5. Deploy and start**
+
+```bash
+cd ~/projects/telegram-claude-bot
+chmod +x deploy.sh
+./deploy.sh
+```
+
+`deploy.sh` copies `bot.js` and dependencies to `~/tools/telegram-claude-bot/`, installs production packages, and restarts the service. Run it after every change.
 
 **Useful commands:**
 
 ```bash
-systemctl --user restart telegram-claude-bot        # apply changes after editing bot.js
+./deploy.sh                                         # deploy latest working tree and restart
 journalctl --user -u telegram-claude-bot -f         # tail logs
 systemctl --user status telegram-claude-bot         # check process health
 ```
 
-For quick local testing:
+For quick local testing without deploying:
 
 ```bash
-node bot.js
+cd ~/tools/telegram-claude-bot && node bot.js
 ```
 
 ## Usage
@@ -83,14 +93,14 @@ Send any message to start a conversation with Claude. Claude Code runs in your h
 | `/cancel` | Abort the current in-flight request |
 | `/restart` | Restart the bot via systemd |
 
-When Claude requests to run a tool, you'll receive a message like:
+When Claude requests to run a tool, you'll receive a formatted message like:
 
 ```
-Tool request: Bash
-`{"command":"ls -la"}`
+🔧 Bash
+$ ls -la /home/user/project
 ```
 
-with **✅ Allow** and **❌ Deny** buttons. Tap Allow to let it proceed, Deny to cancel. Unanswered requests auto-deny after 5 minutes.
+with **✅ Allow** and **❌ Deny** buttons. Tap Allow to let it proceed, Deny to cancel. After execution the message updates to show a snippet of the tool's output. Unanswered requests auto-deny after 5 minutes.
 
 ## Configuration
 

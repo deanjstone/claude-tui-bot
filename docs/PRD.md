@@ -43,19 +43,21 @@ Claude Code is a powerful agentic coding assistant, but it requires a terminal s
 
 ### FR-2: Streaming Responses
 - The bot MUST send a placeholder message immediately upon receiving a user message
-- The placeholder MUST be edited in-place as Claude generates output, at most once per 1.5 seconds
+- The placeholder MUST be edited in-place as Claude generates output, at most once per 1.5 seconds, with HTML formatting applied progressively (code blocks, bold, inline code)
 - The user MUST see the final complete response in the same message (or as a continuation) when Claude finishes
 
 ### FR-3: Permission Gateway
 - When Claude requests to use a tool (Bash, file operations, etc.), the bot MUST pause and send a permission request to the user with inline Allow / Deny buttons
+- The permission request MUST display a tool-aware input preview: shell commands as `$ <command>`, file tools as path + content snippet, search/fetch as query or URL
 - The bot MUST wait up to 5 minutes for a response before auto-denying
 - On denial, Claude's process MUST be terminated and any partial response MUST be delivered
 - The permission message MUST be updated to show the resolution (Allowed / Denied / Auto-denied)
+- After an allowed tool executes, the permission message MUST be updated to show a snippet of the tool's output
 
 ### FR-4: Session Persistence
-- The bot MUST persist Claude session IDs across restarts using a local JSON file
+- The bot MUST persist Claude session IDs across restarts using a local JSON file in the deploy directory
 - Session state MUST be written atomically (write to temp file, rename) to prevent corruption on crash
-- On session failure, the bot MUST automatically retry with a fresh session
+- On session failure, the bot MUST notify the user and automatically retry with a fresh session
 
 ### FR-5: Startup Validation
 - The bot MUST verify the Claude CLI binary exists and is executable at startup
@@ -68,14 +70,14 @@ Claude Code is a powerful agentic coding assistant, but it requires a terminal s
 ## Non-Functional Requirements
 
 - **Latency**: Placeholder message appears within 1 second of receiving a user message
-- **Reliability**: Bot process managed by PM2 with automatic restart on crash
-- **Security**: Bot token stored in `.env`, never committed; no multi-user access controls needed for single-user deployment
-- **Footprint**: No external database; all state in local JSON files
+- **Reliability**: Bot process managed by systemd user service with automatic restart on crash
+- **Security**: Bot token stored in `.env` in the deploy directory, never committed to git
+- **Footprint**: No external database; all runtime state in local JSON files
+- **Deployment**: Source and runtime are separated — source lives in a git repo, deployed files (bot, deps, `.env`, `sessions.json`) live in `~/tools/telegram-claude-bot/`; a `deploy.sh` script copies and restarts
 
 ## Out of Scope for v1
 
 - Message editing / deletion handling
 - Image or file attachment support
 - Voice message transcription
-- Rate limiting per user
 - Admin commands
