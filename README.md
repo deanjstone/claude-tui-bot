@@ -14,7 +14,7 @@ A Telegram bot that gives you a mobile-friendly interface to Claude Code CLI. Se
 - Node.js 18+
 - [Claude Code CLI](https://claude.ai/code) v2.x installed and authenticated
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- PM2 (`npm install -g pm2`) for process management
+- systemd (user session) for process management
 
 ## Setup
 
@@ -43,23 +43,28 @@ BOT_TOKEN=7123456789:AAF...your-token-here
 CLAUDE_PATH=/home/youruser/.local/bin/claude   # optional, auto-detected if omitted
 ```
 
-**4. Run**
+**4. Install the systemd user service**
+
+Copy the service file and enable it:
 
 ```bash
-pm2 start bot.js --name telegram-claude-bot
-pm2 save
-pm2 startup   # prints a command — run it to enable auto-start on reboot
+cp telegram-claude-bot.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable telegram-claude-bot
+systemctl --user start telegram-claude-bot
 ```
 
-**Useful pm2 commands:**
+The service loads `.env` from the project directory, restarts automatically on failure, and starts on login.
+
+**Useful commands:**
 
 ```bash
-pm2 restart telegram-claude-bot   # apply changes after editing bot.js
-pm2 logs telegram-claude-bot      # tail logs
-pm2 status                        # check process health
+systemctl --user restart telegram-claude-bot        # apply changes after editing bot.js
+journalctl --user -u telegram-claude-bot -f         # tail logs
+systemctl --user status telegram-claude-bot         # check process health
 ```
 
-For quick local testing without pm2:
+For quick local testing:
 
 ```bash
 node bot.js
