@@ -37,9 +37,13 @@ const CLAUDE_TIMEOUT_MS = 120_000;
 const EDIT_INTERVAL_MS = 1500;
 const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
 
-// Per-user lock: prevents concurrent claude spawns from the same user
-const inFlight = new Set();
+const inFlight = new Map(); // userId -> { proc }
 const pendingPermissions = new Map(); // permId -> { resolve, timer, chatId, msgId, toolName, preview }
+const lastMessageTime = new Map(); // userId -> timestamp ms
+
+const allowedUserIds = process.env.ALLOWED_USER_IDS
+  ? new Set(process.env.ALLOWED_USER_IDS.split(',').map(id => parseInt(id.trim())))
+  : null;
 
 function loadSessions() {
   try {
@@ -56,7 +60,6 @@ function saveSessions(sessions) {
   fs.renameSync(tmp, SESSIONS_FILE);
 }
 
-// Split on newline or word boundaries to avoid cutting mid-word or mid-formatting
 function splitMessage(text, limit = 4096) {
   const chunks = [];
   let remaining = text;
@@ -69,6 +72,18 @@ function splitMessage(text, limit = 4096) {
   }
   if (remaining.length > 0) chunks.push(remaining);
   return chunks;
+}
+
+function toHtml(text) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/```(\w*)\n?([\s\S]*?)```/g, (_, _lang, code) => `<pre><code>${code.trimEnd()}</code></pre>`)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/\*([^*]+)\*/g, '<i>$1</i>')
+    .replace(/^#{1,3} (.+)$/gm, '<b>$1</b>');
 }
 
 async function requestPermission(ctx, permId, toolName, input) {
@@ -97,12 +112,13 @@ async function requestPermission(ctx, permId, toolName, input) {
   });
 }
 
-function streamClaude(message, sessionId, chatId, msgId, telegram, ctx) {
+function streamClaude(message, sessionId, chatId, msgId, telegram, ctx, onProcSpawned) {
   return new Promise((resolve, reject) => {
     const args = ['-p', message, '--output-format', 'stream-json', '--verbose'];
     if (sessionId) args.push('--resume', sessionId);
 
     const proc = spawn(CLAUDE_PATH, args, { cwd: process.env.HOME });
+    onProcSpawned?.(proc);
 
     let lineBuffer = '';
     let textBuffer = '';
@@ -123,7 +139,9 @@ function streamClaude(message, sessionId, chatId, msgId, telegram, ctx) {
         try {
           await telegram.editMessageText(chatId, msgId, undefined, current);
           lastEditedText = current;
-        } catch {}
+        } catch (err) {
+          console.warn('edit failed:', err.message);
+        }
       }
     }, EDIT_INTERVAL_MS);
 
@@ -173,29 +191,50 @@ function streamClaude(message, sessionId, chatId, msgId, telegram, ctx) {
       }
 
       const finalText = textBuffer || '(no response)';
-      const chunks = splitMessage(finalText);
+      const htmlText = toHtml(finalText);
+      const chunks = splitMessage(htmlText);
 
       try {
         if (chunks[0] !== lastEditedText) {
-          await telegram.editMessageText(chatId, msgId, undefined, chunks[0]);
+          try {
+            await telegram.editMessageText(chatId, msgId, undefined, chunks[0], { parse_mode: 'HTML' });
+          } catch {
+            await telegram.editMessageText(chatId, msgId, undefined, chunks[0]);
+          }
         }
-        for (const chunk of chunks.slice(1)) {
-          await telegram.sendMessage(chatId, chunk);
+      } catch (err) {
+        console.warn('edit failed:', err.message);
+        try {
+          await telegram.sendMessage(chatId, chunks[0]);
+        } catch (e) {
+          console.warn('sendMessage failed:', e.message);
         }
-      } catch {}
+      }
+
+      for (const chunk of chunks.slice(1)) {
+        try {
+          await telegram.sendMessage(chatId, chunk, { parse_mode: 'HTML' });
+        } catch {
+          try {
+            await telegram.sendMessage(chatId, chunk);
+          } catch (err) {
+            console.warn('sendMessage failed:', err.message);
+          }
+        }
+      }
 
       resolve({ result: finalText, session_id: resolvedSessionId });
     });
   });
 }
 
-async function askClaude(message, sessionId, chatId, msgId, telegram, ctx) {
+async function askClaude(message, sessionId, chatId, msgId, telegram, ctx, onProcSpawned) {
   try {
-    return await streamClaude(message, sessionId, chatId, msgId, telegram, ctx);
+    return await streamClaude(message, sessionId, chatId, msgId, telegram, ctx, onProcSpawned);
   } catch (err) {
     // Retry as fresh conversation on any failure when a session was active
     if (sessionId) {
-      return streamClaude(message, null, chatId, msgId, telegram, ctx);
+      return streamClaude(message, null, chatId, msgId, telegram, ctx, onProcSpawned);
     }
     throw err;
   }
@@ -203,9 +242,17 @@ async function askClaude(message, sessionId, chatId, msgId, telegram, ctx) {
 
 const bot = new Telegraf(process.env.BOT_TOKEN, { telegram: { agent: new https.Agent({ family: 4 }) } });
 
-bot.command('start', ctx => {
-  ctx.reply('Connected to Claude. Send a message to begin.\n\nCommands:\n/new — start a fresh conversation\n/session — show current session ID');
-});
+if (allowedUserIds) {
+  bot.use((ctx, next) => {
+    if (!allowedUserIds.has(ctx.from?.id)) return;
+    return next();
+  });
+}
+
+const HELP_TEXT = 'Connected to Claude. Send a message to begin.\n\nThe bot can execute tools with your approval — you will see an inline permission prompt. Note: tools may access your filesystem and run commands.\n\nCommands:\n/new — start a fresh conversation\n/session — show current session ID\n/cancel — abort the current request\n/help — show this message';
+
+bot.command('start', ctx => ctx.reply(HELP_TEXT));
+bot.command('help', ctx => ctx.reply(HELP_TEXT));
 
 bot.command('new', ctx => {
   const sessions = loadSessions();
@@ -218,6 +265,18 @@ bot.command('session', ctx => {
   const sessions = loadSessions();
   const id = sessions[ctx.from.id];
   ctx.reply(id ? `Active session: ${id}` : 'No active session — next message will start one.');
+});
+
+bot.command('cancel', async ctx => {
+  const userId = ctx.from.id;
+  const entry = inFlight.get(userId);
+  if (!entry) {
+    await ctx.reply('No request in progress.');
+    return;
+  }
+  if (entry.proc) entry.proc.kill();
+  inFlight.delete(userId);
+  await ctx.reply('Request cancelled.');
 });
 
 bot.action(/^allow_(.+)$/, async ctx => {
@@ -249,7 +308,14 @@ bot.on('text', async ctx => {
     return;
   }
 
-  inFlight.add(userId);
+  const now = Date.now();
+  const lastTime = lastMessageTime.get(userId);
+  if (lastTime && now - lastTime < 3000) {
+    await ctx.reply('Please wait a moment before sending another message.');
+    return;
+  }
+
+  inFlight.set(userId, { proc: null });
 
   const sessions = loadSessions();
   const sessionId = sessions[userId] ?? null;
@@ -276,7 +342,11 @@ bot.on('text', async ctx => {
       ctx.chat.id,
       placeholderMsg.message_id,
       ctx.telegram,
-      ctx
+      ctx,
+      (proc) => {
+        const entry = inFlight.get(userId);
+        if (entry) entry.proc = proc;
+      }
     );
 
     if (res.session_id && res.session_id !== sessionId) {
@@ -288,6 +358,7 @@ bot.on('text', async ctx => {
   } finally {
     clearInterval(typingInterval);
     inFlight.delete(userId);
+    lastMessageTime.set(userId, Date.now());
   }
 });
 
