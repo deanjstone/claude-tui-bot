@@ -14,7 +14,7 @@ A Telegram bot that gives you a mobile-friendly interface to Claude Code CLI. Se
 - Node.js 18+
 - [Claude Code CLI](https://claude.ai/code) v2.x installed and authenticated
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- PM2 (optional, for process management)
+- PM2 (`npm install -g pm2`) for process management
 
 ## Setup
 
@@ -46,13 +46,23 @@ CLAUDE_PATH=/home/youruser/.local/bin/claude   # optional, auto-detected if omit
 **4. Run**
 
 ```bash
-# Direct
-node bot.js
-
-# With PM2 (recommended)
 pm2 start bot.js --name telegram-claude-bot
 pm2 save
 pm2 startup   # prints a command — run it to enable auto-start on reboot
+```
+
+**Useful pm2 commands:**
+
+```bash
+pm2 restart telegram-claude-bot   # apply changes after editing bot.js
+pm2 logs telegram-claude-bot      # tail logs
+pm2 status                        # check process health
+```
+
+For quick local testing without pm2:
+
+```bash
+node bot.js
 ```
 
 ## Usage
@@ -62,8 +72,10 @@ Send any message to start a conversation with Claude. Claude Code runs in your h
 | Command | Description |
 |---|---|
 | `/start` | Show help |
+| `/help` | Show help |
 | `/new` | Start a fresh conversation (clears session) |
 | `/session` | Show current session ID |
+| `/cancel` | Abort the current in-flight request |
 
 When Claude requests to run a tool, you'll receive a message like:
 
@@ -80,6 +92,7 @@ with **✅ Allow** and **❌ Deny** buttons. Tap Allow to let it proceed, Deny t
 |---|---|---|---|
 | `BOT_TOKEN` | Yes | — | Telegram bot token from BotFather |
 | `CLAUDE_PATH` | No | `/home/$USER/.local/bin/claude` | Path to Claude CLI binary |
+| `ALLOWED_USER_IDS` | No | — | Comma-separated Telegram user IDs allowed to use the bot; if unset, all users are permitted |
 
 ## Architecture
 
