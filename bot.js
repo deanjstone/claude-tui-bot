@@ -249,7 +249,7 @@ if (allowedUserIds) {
   });
 }
 
-const HELP_TEXT = 'Connected to Claude. Send a message to begin.\n\nThe bot can execute tools with your approval — you will see an inline permission prompt. Note: tools may access your filesystem and run commands.\n\nCommands:\n/new — start a fresh conversation\n/session — show current session ID\n/cancel — abort the current request\n/help — show this message';
+const HELP_TEXT = 'Connected to Claude. Send a message to begin.\n\nThe bot can execute tools with your approval — you will see an inline permission prompt. Note: tools may access your filesystem and run commands.\n\nCommands:\n/new — start a fresh conversation\n/session — show current session ID\n/cancel — abort the current request\n/restart — restart the bot service\n/help — show this message';
 
 bot.command('start', ctx => ctx.reply(HELP_TEXT));
 bot.command('help', ctx => ctx.reply(HELP_TEXT));
@@ -265,6 +265,13 @@ bot.command('session', ctx => {
   const sessions = loadSessions();
   const id = sessions[ctx.from.id];
   ctx.reply(id ? `Active session: ${id}` : 'No active session — next message will start one.');
+});
+
+bot.command('restart', async ctx => {
+  await ctx.reply('Restarting...');
+  setTimeout(() => {
+    spawn('systemctl', ['--user', 'restart', 'telegram-claude-bot'], { detached: true, stdio: 'ignore' }).unref();
+  }, 500);
 });
 
 bot.command('cancel', async ctx => {

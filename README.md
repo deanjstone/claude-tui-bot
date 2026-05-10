@@ -81,6 +81,7 @@ Send any message to start a conversation with Claude. Claude Code runs in your h
 | `/new` | Start a fresh conversation (clears session) |
 | `/session` | Show current session ID |
 | `/cancel` | Abort the current in-flight request |
+| `/restart` | Restart the bot via systemd |
 
 When Claude requests to run a tool, you'll receive a message like:
 
