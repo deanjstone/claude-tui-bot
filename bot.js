@@ -45,6 +45,8 @@ const allowedUserIds = process.env.ALLOWED_USER_IDS
   ? new Set(process.env.ALLOWED_USER_IDS.split(',').map(id => parseInt(id.trim())))
   : null;
 
+const OWNER_CHAT_ID = process.env.OWNER_CHAT_ID ? parseInt(process.env.OWNER_CHAT_ID) : null;
+
 function loadSessions() {
   try {
     return JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
@@ -371,6 +373,9 @@ bot.on('text', async ctx => {
 
 bot.launch();
 console.log('Bot running.');
+if (OWNER_CHAT_ID) {
+  bot.telegram.sendMessage(OWNER_CHAT_ID, 'Bot online.').catch(err => console.warn('startup notify failed:', err.message));
+}
 
 process.once('SIGINT', () => {
   pendingPermissions.forEach(p => { clearTimeout(p.timer); p.resolve(false); });

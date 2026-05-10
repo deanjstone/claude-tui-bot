@@ -99,6 +99,7 @@ with **✅ Allow** and **❌ Deny** buttons. Tap Allow to let it proceed, Deny t
 | `BOT_TOKEN` | Yes | — | Telegram bot token from BotFather |
 | `CLAUDE_PATH` | No | `/home/$USER/.local/bin/claude` | Path to Claude CLI binary |
 | `ALLOWED_USER_IDS` | No | — | Comma-separated Telegram user IDs allowed to use the bot; if unset, all users are permitted |
+| `OWNER_CHAT_ID` | No | — | Telegram user ID to message on startup ("Bot online.") |
 
 ## Architecture
 
