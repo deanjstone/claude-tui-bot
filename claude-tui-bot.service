@@ -1,0 +1,18 @@
+[Unit]
+Description=Claude TUI Bot
+After=network.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node --dns-result-order=ipv4first /home/YOUR_USER/tools/claude-tui-bot/bot.js
+WorkingDirectory=/home/YOUR_USER/tools/claude-tui-bot
+EnvironmentFile=/home/YOUR_USER/tools/claude-tui-bot/.env
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

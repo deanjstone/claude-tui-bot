@@ -1,4 +1,4 @@
-# Product Requirements Document — telegram-claude-bot
+# Product Requirements Document — claude-tui-bot
 
 ## Overview
 
@@ -73,7 +73,7 @@ Claude Code is a powerful agentic coding assistant, but it requires a terminal s
 - **Reliability**: Bot process managed by systemd user service with automatic restart on crash
 - **Security**: Bot token stored in `.env` in the deploy directory, never committed to git
 - **Footprint**: No external database; all runtime state in local JSON files
-- **Deployment**: Source and runtime are separated — source lives in a git repo, deployed files (bot, deps, `.env`, `sessions.json`) live in `~/tools/telegram-claude-bot/`; a `deploy.sh` script copies and restarts
+- **Deployment**: Source and runtime are separated — source lives in a git repo, deployed files (bot, deps, `.env`, `sessions.json`) live in `~/tools/claude-tui-bot/`; a `deploy.sh` script copies and restarts
 
 ## Out of Scope for v1
 

@@ -1,5 +1,5 @@
 {
-  "name": "telegram-claude-bot",
+  "name": "claude-tui-bot",
   "version": "1.0.0",
   "description": "Telegram bot frontend for Claude Code CLI",
   "main": "bot.js",

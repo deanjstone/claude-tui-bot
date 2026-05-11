@@ -1,4 +1,4 @@
-# Architecture Decision Records — telegram-claude-bot
+# Architecture Decision Records — claude-tui-bot
 
 ---
 
@@ -230,10 +230,10 @@ Attach a `.code` property to errors thrown inside `streamClaude`: `'TIMEOUT'` fo
 **Status:** Accepted
 
 **Context:**
-The bot originally ran directly from its git repository (`~/projects/telegram-claude-bot/`). This meant the systemd service pointed at the working tree, so any partial edit to `bot.js` was immediately live, `.env` and `sessions.json` sat alongside source files, and `node_modules` lived in the repo directory.
+The bot originally ran directly from its git repository (`~/projects/claude-tui-bot/`). This meant the systemd service pointed at the working tree, so any partial edit to `bot.js` was immediately live, `.env` and `sessions.json` sat alongside source files, and `node_modules` lived in the repo directory.
 
 **Decision:**
-Introduce a distinct deployment directory at `~/tools/telegram-claude-bot/`. A `deploy.sh` script in the repo copies `bot.js`, `package.json`, and `package-lock.json` to the deploy directory, runs `npm ci --omit=dev`, and restarts the service. The systemd service's `WorkingDirectory`, `ExecStart`, and `EnvironmentFile` all point at `~/tools/`. The `.env` file lives only in the deploy directory; `sessions.json` is generated there at runtime. The git repo stays clean of runtime state.
+Introduce a distinct deployment directory at `~/tools/claude-tui-bot/`. A `deploy.sh` script in the repo copies `bot.js`, `package.json`, and `package-lock.json` to the deploy directory, runs `npm ci --omit=dev`, and restarts the service. The systemd service's `WorkingDirectory`, `ExecStart`, and `EnvironmentFile` all point at `~/tools/`. The `.env` file lives only in the deploy directory; `sessions.json` is generated there at runtime. The git repo stays clean of runtime state.
 
 **Consequences:**
 - Editing source files in the repo has no effect until `./deploy.sh` is run — no accidental live changes
@@ -241,3 +241,28 @@ Introduce a distinct deployment directory at `~/tools/telegram-claude-bot/`. A `
 - `sessions.json` is stable across source edits and repo operations (e.g., `git clean` can't delete it)
 - `npm ci --omit=dev` on each deploy keeps `node_modules` up to date without manual intervention
 - The service template in the repo uses `YOUR_USER` as a placeholder; the README documents a `sed` one-liner to install it correctly for any username
+
+---
+
+## ADR-015: Switch from stream-json subprocess to tmux-based interactive session (supersedes ADR-001, ADR-002, ADR-006)
+
+**Status:** Accepted
+
+**Context:**
+The stream-json architecture (ADR-001/ADR-002) spawned Claude with `-p <message> --output-format stream-json --verbose` for each message — a one-shot, non-interactive subprocess. This worked well for simple Q&A but was fundamentally incompatible with Claude's interactive terminal UIs: plan mode confirmations, native tool permission prompts, model/mode selection dialogs, and checkpoint/continue prompts. These UIs require a live terminal session with keyboard input.
+
+**Decision:**
+Replace the subprocess approach with a tmux-based architecture. A new `tmux.js` module (breaking ADR-006's single-file rule — see below) wraps the tmux CLI with async helpers. The bot maintains one tmux session (`claude-tui-bot`) with one window per user (`user-<userId>`). Claude runs interactively in that window. Messages are sent via `tmux send-keys -l`; responses are captured by polling `tmux capture-pane` every 500ms and hash-diffing to detect changes. Completion is detected when the pane is stable for 1.5s and contains Claude's input box (`╭`/`╰` box-drawing characters).
+
+`tmux.js` is a separate module (superseding ADR-006) because the tmux wrapper is substantial enough to warrant isolation and independent testability; the bot has grown past single-file territory.
+
+The custom permission gateway (`pendingPermissions`, `allowedTools`, inline Allow/Deny buttons) is removed. Tool permissions are handled by Claude's own native terminal UI, surfaced to the user via tmux navigation buttons (Phase 3).
+
+**Consequences:**
+- All of Claude's interactive UIs work: plan mode, tool permissions, model selection, checkpoints
+- Sessions persist across bot restarts (tmux survives process restarts)
+- `sessions.json` is no longer needed — tmux window existence is the session state
+- Lost: structured JSON events (thinking blocks, tool_result snippets in permission messages)
+- Lost: the rich custom permission preview (tool name + input + result output as distinct Telegram messages)
+- Polling adds ~500ms latency before the first Telegram edit vs stream-json's near-instant first event
+- Window naming is `user-<userId>`; tmux session is `claude-tui-bot` (hardcoded, not configurable)
