@@ -167,6 +167,10 @@ async function waitForReady(target) {
     await sleep(POLL_MS);
     const pane = tmux.stripAnsi(await tmux.capturePane(target));
     if (isReadyForInput(pane)) return;
+    // Auto-accept the first-run folder trust prompt
+    if (pane.includes('trust this folder')) {
+      await tmux.sendKeys(target, '1', { enter: true, literal: true });
+    }
   }
   throw Object.assign(new Error('Claude took too long to start'), { code: 'READY_TIMEOUT' });
 }
